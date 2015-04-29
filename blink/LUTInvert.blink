@@ -1,0 +1,231 @@
+//
+// A kernel that will produce the inverse of a 3d LUT, represented as an image
+//
+
+//
+// A distance-based weighting function
+//
+float falloffFilter(float d, float f) {
+  return exp(-d * f);
+}
+
+//
+// Map from the 2D position in the CMSTestPattern image to a 3D LUT position
+//
+int4 nukePosition2dToPosition3d(int2 pos, int width, int height, int nukeBlockSize, int lutResolution) {
+    int4 position;
+
+    int pixel = pos.y/nukeBlockSize*width/nukeBlockSize + pos.x/nukeBlockSize;
+    position.w = pixel;
+
+    position.x = pixel % lutResolution;
+    position.y = (pixel / lutResolution) % lutResolution;
+    position.z = (pixel / (lutResolution*lutResolution)) % lutResolution;
+
+    return position;
+}
+
+//
+// kernel
+//
+kernel LUTInvertKernel : public ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessRandom, eEdgeClamped> src;
+  Image<eWrite> dst;
+
+  param:
+    int method;
+    float cutoff;
+    float falloff;
+
+  local:
+    int lutResolution;
+    int nukeBlockSize;
+
+  void define() {
+    defineParam(method, "method", 1);
+    defineParam(cutoff, "cutoff", 0.5f);
+    defineParam(falloff, "falloff", 5.f);
+  }
+
+  void init() {
+    // The Nuke CMSTestPattern node generates 7x7 pixel blocks for each LUT entry
+    nukeBlockSize = 7;
+    float pixels = src.bounds.width() * src.bounds.height() / (nukeBlockSize * nukeBlockSize);
+    lutResolution = int(floor(pow(pixels, 0.333333333334f)));
+  }
+
+  void process(int2 pos) {
+    float3 value;
+    float highDistance;
+
+    //
+    // Information for the input pixel position
+    //
+    int4 inputPosition;
+    inputPosition = nukePosition2dToPosition3d(pos, 
+      src.bounds.width(), src.bounds.height(), nukeBlockSize, lutResolution);
+
+    float3 inputSample;
+    inputSample = float3(inputPosition.x, inputPosition.y, inputPosition.z) / (lutResolution-1.f);
+
+    //
+    // Skip the extra pixels at the top of the image
+    //
+    if( inputPosition.w >= lutResolution*lutResolution*lutResolution ) {
+      value = float3(0.f);
+      highDistance = 0.f;
+    }
+    else {
+      //
+      // Algorithm options
+      //
+      // 0. Pick the single closest sample
+      //
+      int4 outputPosition;
+      SampleType(src) sample;
+      float3 outputSample;
+
+      if( method == 0) {
+        float distance;
+
+        int2 highPosition;
+        float3 highSample;
+
+        highDistance = 1000.f;
+
+        // Step through each of the input pixels
+        // - Only sample one pixel from each block though. Blocks are nukeBlockSize x nukeBlockSize big.
+        for(int inX = nukeBlockSize/2; inX<src.bounds.width(); inX +=nukeBlockSize) {
+          for(int inY = nukeBlockSize/2; inY<src.bounds.height(); inY +=nukeBlockSize) {
+
+            // Compute LUT 3D position and get value
+            outputPosition = nukePosition2dToPosition3d(int2(inX, inY), 
+              src.bounds.width(), src.bounds.height(), nukeBlockSize, lutResolution);
+
+            // Disallow the extra black pixels at the top of the image
+            if( outputPosition.w < lutResolution*lutResolution*lutResolution ) {
+              sample = src(inX, inY);
+              outputSample = float3(sample.x, sample.y, sample.z);
+
+              // Get distance to this sample
+              distance = length(outputSample - inputSample);
+
+              if( distance < highDistance ) {
+                value = float3(outputPosition.x, outputPosition.y, outputPosition.z) / (lutResolution-1.f);
+                
+                highDistance = distance;
+                highSample = outputSample;
+                highPosition = int2(inX, inY);
+              }
+            }
+          }
+        }
+
+        //
+        // Diagnostics
+        // 
+        /*
+        value.x = highPosition.x;
+        value.y = highPosition.y;
+
+        value.x = highSample.x;
+        value.y = highSample.y;
+        value.z = highSample.z;
+        */
+      }
+
+      //
+      // 1. Brute force scattered data interpolation
+      // - Step through every pixel
+      // - Weight the pixel/sample by its distance from the input
+      // - Add the weighted result to a running sum
+      // - Divide by the sum of the weights 
+      //
+      else if( method == 1 ) {
+        float3 weightedValueSum;
+        float weightSum;
+
+        float weight, distance;
+
+        int2 highPosition;
+        float3 highSample, highValue;
+
+        weightedValueSum = float3(0.f);
+        weightSum = 0.f;
+        highDistance = 1000.f;
+
+        // Step through each of the input pixels
+        // - Only sample one pixel from each block though. Blocks are nukeBlockSize x nukeBlockSize big.
+        for(int inX = nukeBlockSize/2; inX<src.bounds.width(); inX +=nukeBlockSize) {
+          for(int inY = nukeBlockSize/2; inY<src.bounds.height(); inY +=nukeBlockSize) {
+
+            // Compute LUT 3D position and get value
+            outputPosition = nukePosition2dToPosition3d(int2(inX, inY), 
+              src.bounds.width(), src.bounds.height(), nukeBlockSize, lutResolution);
+
+            // Disallow the extra black pixels at the top of the image
+            if( outputPosition.w < lutResolution*lutResolution*lutResolution ) {
+              sample = src(inX, inY);
+              outputSample = float3(sample.x, sample.y, sample.z);
+
+              // Get weight for this sample
+              distance = length(outputSample - inputSample);
+              if( distance < cutoff )
+                weight = falloffFilter(distance*lutResolution, falloff);
+              else
+                weight = 0.f;
+
+              // Keep track of the closest sample, just in case
+              if( distance < highDistance ) {
+                highValue = float3(outputPosition.x, outputPosition.y, outputPosition.z) / (lutResolution-1.f);
+                
+                highDistance = distance;
+                highSample = outputSample;
+                highPosition = int2(inX, inY);
+              }
+
+              // Add into interpolation sum
+              weightedValueSum += weight * (float3(outputPosition.x, outputPosition.y, outputPosition.z) / (lutResolution-1));
+              weightSum += weight;
+            }
+          }
+        }
+
+        // Divide out weighting
+        if( weightSum > 0.f ) {
+          value = weightedValueSum / weightSum;
+          highDistance = weightSum;
+
+        // Use the nearest sample if there were no weighted values
+        } else {
+          value = highValue;
+          highDistance = 1000.f;
+        }
+      }
+    }
+
+    //
+    // Diagnostics
+    // 
+    /*
+    value.x = lutResolution;
+    value.y = inputPosition.w;
+
+    value.x = inputSample.x;
+    value.y = inputSample.y;
+    value.z = inputSample.z;
+    */
+
+    //
+    // Copy to output
+    //
+    SampleType(src) t;
+    t.x = value.x;
+    t.y = value.y;
+    t.z = value.z;
+    t.w = highDistance;
+
+    dst() = t;
+  }
+};

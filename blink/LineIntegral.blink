@@ -1,0 +1,48 @@
+//
+// A kernel that will compute the integral of each line in the image
+//
+
+//
+// kernel
+//
+kernel LineIntegralKernel : public ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessRandom, eEdgeClamped> src;
+  Image<eWrite> dst;
+
+  param:
+
+  local:
+
+  void define() {
+  }
+
+  void init() {
+  }
+
+  void process(int2 pos) {
+    float3 integral;
+    integral = float3(0.f);
+
+    int inY;
+    SampleType(src) sample;
+
+    // Step through each of the input pixels in the current row
+    inY = pos.y;
+    for(int inX = 0; inX<pos.x; inX +=1) {
+      sample = src(inX, inY);
+      integral += float3(sample.x, sample.y, sample.z);
+    }
+
+    //
+    // Copy to output
+    //
+    SampleType(src) t;
+    t.x = integral.x;
+    t.y = integral.y;
+    t.z = integral.z;
+    t.w = 1.0;
+
+    dst() = t;
+  }
+};

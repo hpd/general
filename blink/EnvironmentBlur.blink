@@ -1,0 +1,101 @@
+//
+// A kernel that will blur Spherical environment maps
+//
+
+//
+// Functions specific to spherical panoramas
+//
+float3 spherical_tex2dir(float2 tc)
+{
+  float theta, gamma, u, v;
+  float3 dir;
+
+  u = tc.x*2 - 1;
+  v = tc.y*2 - 1;
+
+  theta = u*3.14159;
+  gamma = v*3.14159f/2.f;
+    
+  dir.z = cos(theta)*cos(gamma);
+  dir.y = sin(gamma);
+  dir.x = sin(theta)*cos(gamma);
+
+  return dir;
+}
+
+float spherical_solidAngle(int y, int width, int height)
+{
+  float u = (2.f*3.14159f)/width;
+  float v = sin(float(y+0.5)/height*3.14159f)*(3.14159f/height);
+  return u*v;  
+}
+
+//
+// Add the same functions for other panorama types to support those types
+//
+
+//
+// kernel
+//
+kernel EnvironmentBlurKernel : public ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessRandom, eEdgeClamped> src;
+  Image<eWrite> dst;
+
+  param:
+    float phongExponent;
+
+  void define() {
+    defineParam(phongExponent, "phongExponent", 1.f);
+  }
+
+  void process(int2 pos) {
+    SampleType(src) valueSum(0);
+    ValueType(src) filterSum(0);
+    
+    ValueType(src) filter, u, v;
+
+    float3 centerDir, filterDir;
+
+    // The direction for the current pixel
+    u = float(pos.x + 0.5f)/src.bounds.width();
+    v = float(pos.y + 0.5f)/src.bounds.height();
+    centerDir = spherical_tex2dir( float2(u, v) );
+
+    // Would be nice to have a min and max range on the parameter definition
+    // Not there now, so we just make sure the value doesn't go below 1
+    // 1 = Lambertian Diffuse
+    float exponent = max(phongExponent, 1.f);
+
+    //Iterate over the src image rows
+    for(int j = 0; j < src.bounds.height(); j++) {
+
+      // solid angle is the same for all pixels in a row
+      float dsa = spherical_solidAngle(j, src.bounds.width(), src.bounds.height());
+
+      //Iterate over the src image columns
+      for(int i = 0; i < src.bounds.width(); i++) { 
+
+        // The direction for the pixel to be filtered
+        u = float(i + 0.5f)/src.bounds.width();
+        v = float(j + 0.5f)/src.bounds.height();
+        filterDir = spherical_tex2dir( float2(u, v) );
+
+        //Get the filter value
+        ValueType(src) filterVal = pow(max(dot(centerDir, filterDir), 0.f), exponent)*dsa;
+
+        //Multiply the src value by the corresponding filter weight and accumulate
+        valueSum += filterVal * src(i, j);
+
+        //Update the filter sum with the current filter value
+        filterSum += filterVal;
+      }
+    }
+
+    //Normalise the value sum, avoiding division by zero
+    if (filterSum != 0) 
+      valueSum /= filterSum;
+
+    dst() = valueSum;
+  }
+};

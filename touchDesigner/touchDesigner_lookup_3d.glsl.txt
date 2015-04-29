@@ -1,0 +1,122 @@
+layout(location = 0) out vec4 fragColor;
+
+vec2 uvCoordinateLUT3d1(vec4 base,
+	int FilmLutWidth,
+	int FilmLutTilesWide,
+	int FilmLutTilesHigh)
+{
+	vec2 uv;
+
+	float Padding = .5/(FilmLutWidth);
+	float PaddingU = .5/(FilmLutWidth * FilmLutTilesWide);
+	float PaddingV = .5/(FilmLutWidth * FilmLutTilesHigh);
+
+	// index 1
+	int indexB = int(clamp(base.b, 0, 1) * FilmLutWidth-1);
+	int tileU = indexB % FilmLutTilesWide;
+	int tileV = indexB / FilmLutTilesWide;
+	
+	uv.r = mix(PaddingU,1-PaddingU,base.r)/FilmLutTilesWide + tileU*1.f/FilmLutTilesWide;
+	uv.g = mix(PaddingV,1-PaddingV,base.g)/FilmLutTilesHigh + tileV*1.f/FilmLutTilesHigh;
+
+	return uv;
+}
+
+vec4
+texture3dTonemap1(vec4 base,
+	sampler2D tonemapSampler,
+	int FilmLutWidth,
+	int FilmLutTilesWide,
+	int FilmLutTileHigh )
+{
+	vec4 tonemappedColor[8];
+
+	// clamp because we only use values between 0 and 1
+	base = clamp(base, 0, 1);
+
+	// index values interpolation factor for RGB
+	float indexRf = (base.r * (FilmLutWidth-1));
+	int indexR    = int(floor(indexRf));
+ 	float interpR = fract(indexRf);
+	float indexRfb = floor(indexRf) / (FilmLutWidth-1);
+
+	float indexGf = (base.g * (FilmLutWidth-1));
+	int indexG    = int(floor(indexGf));
+ 	float interpG = fract(indexGf);
+	float indexGfb = floor(indexGf) / (FilmLutWidth-1);
+
+	float indexBf = (base.b * (FilmLutWidth-1));
+	int indexB    = int(floor(indexBf));
+ 	float interpB = fract(indexBf);
+	float indexBfb = floor(indexBf) / (FilmLutWidth-1);
+
+	float delta = 1.f / (FilmLutWidth-1);
+
+	vec2 uv;
+
+	// Sample the 8 points around the current sample position
+
+	// sample r, g, b
+	uv = uvCoordinateLUT3d1(vec4(indexRfb        , indexGfb        , indexBfb        , 1.f), 
+		FilmLutWidth, FilmLutTilesWide, FilmLutTileHigh);
+	tonemappedColor[0] = texture(tonemapSampler, uv);
+	
+	// sample r, g, b+1
+	uv = uvCoordinateLUT3d1(vec4(indexRfb        , indexGfb        , indexBfb + delta, 1.f), 
+		FilmLutWidth, FilmLutTilesWide, FilmLutTileHigh);
+	tonemappedColor[1] = texture(tonemapSampler, uv);
+
+	// sample r, g+1, b
+	uv = uvCoordinateLUT3d1(vec4(indexRfb        , indexGfb + delta, indexBfb        , 1.f), 
+		FilmLutWidth, FilmLutTilesWide, FilmLutTileHigh);
+	tonemappedColor[2] = texture(tonemapSampler, uv);
+
+	// sample r, g+1, b+1
+	uv = uvCoordinateLUT3d1(vec4(indexRfb        , indexGfb + delta, indexBfb + delta, 1.f), 
+		FilmLutWidth, FilmLutTilesWide, FilmLutTileHigh);
+	tonemappedColor[3] = texture(tonemapSampler, uv);
+
+	// sample r+1, g, b
+	uv = uvCoordinateLUT3d1(vec4(indexRfb + delta, indexGfb        , indexBfb        , 1.f), 
+		FilmLutWidth, FilmLutTilesWide, FilmLutTileHigh);
+	tonemappedColor[4] = texture(tonemapSampler, uv);
+	
+	// sample r+1, g, b+1
+	uv = uvCoordinateLUT3d1(vec4(indexRfb + delta, indexGfb        , indexBfb + delta, 1.f), 
+		FilmLutWidth, FilmLutTilesWide, FilmLutTileHigh);
+	tonemappedColor[5] = texture(tonemapSampler, uv);
+
+	// sample r+1, g+1, b
+	uv = uvCoordinateLUT3d1(vec4(indexRfb + delta, indexGfb + delta, indexBfb        , 1.f), 
+		FilmLutWidth, FilmLutTilesWide, FilmLutTileHigh);
+	tonemappedColor[6] = texture(tonemapSampler, uv);
+
+	// sample r+1, g+1, b+1
+	uv = uvCoordinateLUT3d1(vec4(indexRfb + delta, indexGfb + delta, indexBfb + delta, 1.f), 
+		FilmLutWidth, FilmLutTilesWide, FilmLutTileHigh);
+	tonemappedColor[7] = texture(tonemapSampler, uv);
+
+
+	// Interpolate along the 4 lines in B
+	tonemappedColor[0] = mix(tonemappedColor[0], tonemappedColor[1], interpB);
+	tonemappedColor[2] = mix(tonemappedColor[2], tonemappedColor[3], interpB);
+	tonemappedColor[4] = mix(tonemappedColor[4], tonemappedColor[5], interpB);
+	tonemappedColor[6] = mix(tonemappedColor[6], tonemappedColor[7], interpB);
+	
+	// Interpolate along the 2 lines in G
+	tonemappedColor[0] = mix(tonemappedColor[0], tonemappedColor[2], interpG);
+	tonemappedColor[4] = mix(tonemappedColor[4], tonemappedColor[6], interpG);
+
+	// Interpolate along the 1 line in R
+	tonemappedColor[0] = mix(tonemappedColor[0], tonemappedColor[4], interpR);
+
+	return tonemappedColor[0];
+}
+
+
+void main()
+{
+	vec4 base = texture(sTD2DInputs[0], vUV.st);
+
+	fragColor = texture3dTonemap1(base, sTD2DInputs[1], 32, 8, 4);
+}
