@@ -1,0 +1,97 @@
+//
+// A kernel that will apply 3d LUT to an image. The 3d LUT is represented as the Nuke cmsTestPattern
+//
+
+//
+// Map from a 2D pixel coordinate in the CMSTestPattern image to a 3D LUT position
+//
+int4 nukePosition2dToPosition3d(int2 pos, int width, int height, int nukeBlockSize, int lutResolution) {
+    int4 position;
+
+    int pixel = pos.y/nukeBlockSize*width/nukeBlockSize + pos.x/nukeBlockSize;
+    position.w = pixel;
+
+    position.x = pixel % lutResolution;
+    position.y = (pixel / lutResolution) % lutResolution;
+    position.z = (pixel / (lutResolution*lutResolution)) % lutResolution;
+
+    return position;
+}
+
+//
+// Map from a 3D LUT position to 2D pixel coordinate in the CMSTestPattern image
+//
+int2 position3dToNukePosition(float3 pos, int width, int height, int nukeBlockSize, int lutResolution) {
+    int2 position;
+
+    int pixel = (round(pos.z)*lutResolution*lutResolution + round(pos.y)*lutResolution + round(pos.x));
+
+    position.x = (pixel%(width/nukeBlockSize))*nukeBlockSize;
+    position.y = (pixel/(width/nukeBlockSize))*nukeBlockSize;
+
+    // Put the position in the middle of the nukeBlockSize x nukeBlockSize block
+    position += nukeBlockSize/2;
+
+    return position;
+}
+
+//
+// kernel
+//
+kernel LUTInvertKernel : public ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessRandom, eEdgeClamped> src;
+  Image<eRead, eAccessRandom, eEdgeClamped> cmsPattern;
+  Image<eWrite> dst;
+
+  param:
+    int interpolation;
+
+  local:
+    int lutResolution;
+    int nukeBlockSize;
+
+  void define() {
+    // unused for now. 
+    defineParam(interpolation, "interpolation", 0);
+  }
+
+  void init() {
+    // The Nuke CMSTestPattern node generates 7x7 pixel blocks for each LUT entry
+    nukeBlockSize = 7;
+    float pixels = cmsPattern.bounds.width() * cmsPattern.bounds.height() / (nukeBlockSize * nukeBlockSize);
+    lutResolution = int(floor(pow(pixels, 0.333333333334f)));
+  }
+
+  void process(int2 pos) {
+    SampleType(cmsPattern) cmsSample;
+
+    // Sample the src image
+    SampleType(src) srcSample;
+    srcSample = src(pos.x, pos.y);
+
+    // Use the 3D LUT to find the new value
+    
+    // Nearest point
+    if( interpolation == 0 ) {
+      float3 srcLUTPosition;
+      srcLUTPosition.x = clamp(srcSample.x, 0.0f, 1.0f) * (lutResolution-1);
+      srcLUTPosition.y = clamp(srcSample.y, 0.0f, 1.0f) * (lutResolution-1);
+      srcLUTPosition.z = clamp(srcSample.z, 0.0f, 1.0f) * (lutResolution-1);
+
+      int2 cmsSamplePosition;
+      cmsSamplePosition = position3dToNukePosition(srcLUTPosition, 
+        cmsPattern.bounds.width(), cmsPattern.bounds.height(), nukeBlockSize, lutResolution);
+
+      cmsSample = cmsPattern(cmsSamplePosition.x, cmsSamplePosition.y);
+    }
+
+    // Write the new value to dst
+    SampleType(dst) t;
+    t.x = cmsSample.x;
+    t.y = cmsSample.y;
+    t.z = cmsSample.z;
+
+    dst() = t;
+  }
+};
