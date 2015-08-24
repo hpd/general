@@ -28,7 +28,7 @@ int4 nukePosition2dToPosition3d(int2 pos, int width, int height, int nukeBlockSi
 //
 // kernel
 //
-kernel LUTInvertKernel : public ImageComputationKernel<ePixelWise>
+kernel LUTRecoverKernel : public ImageComputationKernel<ePixelWise>
 {
   Image<eRead, eAccessRandom, eEdgeClamped> cmsPattern;
   Image<eRead, eAccessRandom, eEdgeClamped> before;
