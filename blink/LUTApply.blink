@@ -1,4 +1,8 @@
 //
+// Copyright (c) 2014-2015 Haarm-Pieter Duiker <hpd1@duikerresearch.com>
+//
+
+//
 // A kernel that will apply 3d LUT to an image. The 3d LUT is represented as the Nuke cmsTestPattern
 //
 

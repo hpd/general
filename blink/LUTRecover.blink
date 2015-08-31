@@ -1,4 +1,8 @@
 //
+// Copyright (c) 2014-2015 Haarm-Pieter Duiker <hpd1@duikerresearch.com>
+//
+
+//
 // A kernel that will recover a 3d LUT by comparing two images
 //
 
@@ -62,17 +66,17 @@ kernel LUTRecoverKernel : public ImageComputationKernel<ePixelWise>
     //
     // Information for the input pixel position
     //
-    int4 inputPosition;
-    inputPosition = nukePosition2dToPosition3d(pos, 
+    int4 cmsPosition;
+    cmsPosition = nukePosition2dToPosition3d(pos, 
       cmsPattern.bounds.width(), cmsPattern.bounds.height(), nukeBlockSize, lutResolution);
 
-    float3 inputSample;
-    inputSample = float3(inputPosition.x, inputPosition.y, inputPosition.z) / (lutResolution-1.f);
+    float3 cmsSample;
+    cmsSample = float3(cmsPosition.x, cmsPosition.y, cmsPosition.z) / (lutResolution-1.f);
 
     //
     // Skip the extra pixels at the top of the image
     //
-    if( inputPosition.w >= lutResolution*lutResolution*lutResolution ) {
+    if( cmsPosition.w >= lutResolution*lutResolution*lutResolution ) {
       value = float3(0.f);
       highDistance = 0.f;
     }
@@ -105,18 +109,19 @@ kernel LUTRecoverKernel : public ImageComputationKernel<ePixelWise>
       weightSum = 0.f;
       highDistance = 1000.f;
 
-      // Step through each of the input pixels
-      // - Only sample one pixel from each block though. Blocks are nukeBlockSize x nukeBlockSize big.
+      // Step through each of the before and after input pixels
       for(int inX = 0; inX<before.bounds.width(); inX += 1) {
         for(int inY = 0; inY<before.bounds.height(); inY += 1) {
 
+          // Get sample values
           beforePixel = before(inX, inY);
           beforeSample = float3(beforePixel.x, beforePixel.y, beforePixel.z);
           afterPixel = after(inX, inY);
           afterSample = float3(afterPixel.x, afterPixel.y, afterPixel.z);
 
-          // Get weight for this sample
-          distance = length(beforeSample - inputSample);
+          // Compute weight for this sample
+          // How close is the 'before' value to the current cmsPattern value
+          distance = length(beforeSample - cmsSample);
           if( distance < cutoff )
             weight = falloffFilter(distance*lutResolution, falloff);
           else
