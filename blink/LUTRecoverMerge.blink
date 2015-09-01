@@ -1,0 +1,137 @@
+//
+// Copyright (c) 2014-2015 Haarm-Pieter Duiker <hpd1@duikerresearch.com>
+//
+
+//
+// A kernel that will merge two recovered 3d LUTs images
+//
+
+//
+// Map from the 2D position in the CMSTestPattern image to a 3D LUT position
+//
+int4 nukePosition2dToPosition3d(int2 pos, int width, int height, int nukeBlockSize, int lutResolution) {
+    int4 position;
+
+    int pixel = pos.y/nukeBlockSize*width/nukeBlockSize + pos.x/nukeBlockSize;
+    position.w = pixel;
+
+    position.x = pixel % lutResolution;
+    position.y = (pixel / lutResolution) % lutResolution;
+    position.z = (pixel / (lutResolution*lutResolution)) % lutResolution;
+
+    return position;
+}
+
+//
+// kernel
+//
+kernel LUTRecoverMergeKernel : public ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessRandom, eEdgeClamped> recover1;
+  Image<eRead, eAccessRandom, eEdgeClamped> recover2;
+  Image<eWrite> dst;
+
+  param:
+
+  local:
+    int lutResolution;
+    int nukeBlockSize;
+
+  void define() {
+  }
+
+  void init() {
+    // The Nuke CMSTestPattern node generates 7x7 pixel blocks for each LUT entry
+    nukeBlockSize = 7;
+    float pixels = recover1.bounds.width() * recover1.bounds.height() / (nukeBlockSize * nukeBlockSize);
+    lutResolution = int(floor(pow(pixels, 0.333333333334f)));
+  }
+
+  void process(int2 pos) {
+    float3 value;
+    float highDistance;
+
+    //
+    // Information for the input pixel position
+    //
+    int4 cmsPosition;
+    cmsPosition = nukePosition2dToPosition3d(pos, 
+      recover1.bounds.width(), recover1.bounds.height(), nukeBlockSize, lutResolution);
+
+    float3 cmsSample;
+    cmsSample = float3(cmsPosition.x, cmsPosition.y, cmsPosition.z) / (lutResolution-1.f);
+
+    //
+    // Skip the extra pixels at the top of the image
+    //
+    if( cmsPosition.w >= lutResolution*lutResolution*lutResolution ) {
+      value = float3(0.f);
+      highDistance = 0.f;
+    }
+    else {
+      //
+      // The alpha value for each recovered LUT is the weight of the recovered
+      // sample. Divide each sample by the weight, sum the divided samples, sum
+      // the weights and multiple out the weight once more.
+      //
+
+      float3 weightedValueSum;
+      float weightSum;
+
+      SampleType(recover1) recover1Pixel;
+      float3 recover1Sample;
+      float  recover1Weight;
+      SampleType(recover2) recover2Pixel;
+      float3 recover2Sample;
+      float  recover2Weight;
+
+      weightedValueSum = float3(0.f);
+      weightSum = 0.f;
+      highDistance = 1000.f;
+
+      // Get sample values
+      recover1Pixel = recover1(pos.x, pos.y);
+      recover1Sample = float3(recover1Pixel.x, recover1Pixel.y, 
+        recover1Pixel.z);
+      recover1Weight = recover1Pixel.w;
+
+      recover2Pixel = recover2(pos.x, pos.y);
+      recover2Sample = float3(recover2Pixel.x, recover2Pixel.y, 
+        recover2Pixel.z);
+      recover2Weight = recover2Pixel.w;
+
+      // Add samples into weighted sums
+      if( recover1Weight > 0.f ) {
+        weightedValueSum += recover1Sample * recover1Weight;
+        weightSum += recover1Weight;
+      }
+
+      if( recover2Weight > 0.f ) {
+        weightedValueSum += recover2Sample * recover2Weight;
+        weightSum += recover2Weight;
+      }
+
+      // Divide out weighting
+      if( weightSum > 0.f ) {
+        value = weightedValueSum / weightSum;
+        highDistance = weightSum;
+
+      // Use the nearest sample if there were no weighted values
+      } else {
+        value = float3(1.0f, 0.f, 0.f);
+        highDistance = 0.f;
+      }
+    }
+
+    //
+    // Copy to output
+    //
+    SampleType(dst) t;
+    t.x = value.x;
+    t.y = value.y;
+    t.z = value.z;
+    t.w = highDistance;
+
+    dst() = t;
+  }
+};
