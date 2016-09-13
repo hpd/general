@@ -1,15 +1,34 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+#
+# Copyright (c) 2016 Haarm-Pieter Duiker <hpd1@duikerresearch.com>
+#
+
 import math
 import numpy as np
 import os
+import shutil
+import subprocess as sp
 import sys
+import tempfile
 import timeit
 import traceback
 
 import OpenImageIO as oiio
-from OpenImageIO import ImageBuf, ImageSpec, ImageBufAlgo
+from OpenImageIO import ImageBuf, ImageSpec, ImageBufAlgo, ImageInput, ROI
+
+# Formats with exif data
+generalExtensions = ["jpg", "tiff", "tif"]
+
+# Should match
+# https://github.com/OpenImageIO/oiio/blob/master/src/raw.imageio/rawinput.cpp#L81
+rawExtensions = ["bay", "bmq", "cr2", "crw", "cs1", "dc2", "dcr", "dng",
+    "erf", "fff", "hdr", "k25", "kdc", "mdc", "mos", "mrw",
+    "nef", "orf", "pef", "pxn", "raf", "raw", "rdc", "sr2",
+    "srf", "x3f", "arw", "3fr", "cine", "ia", "kc2", "mef",
+    "nrw", "qtk", "rw2", "sti", "rwl", "srw", "drf", "dsc",
+    "ptx", "cap", "iiq", "rwz"]
 
 #
 # LUT related functions
@@ -35,6 +54,110 @@ def loadResponse( response ):
             lut[c][i-5] = float(values[c])
     
     return lut
+
+#
+# Workaround for OIIO libRaw support
+#
+temp_dirs = []
+
+def oiioSupportsRaw():
+    '''
+    Check to see if raw files can be loaded natively
+    '''
+    # Check to see if the raw plugin has been loaded
+    format_list = oiio.get_string_attribute( "format_list" ).split(',')
+    raw_plugin_present = 'raw' in format_list
+
+    # Check to see if version is above when raw reading was fixed
+    # Update this version number to reflect when the functionality is fixed
+    version_great_enough = oiio.VERSION >= 10800
+
+    return (raw_plugin_present and version_great_enough)
+
+def loadImageBuffer( imagePath, outputGamut=None ):
+    '''
+    Load an image buffer. Manage raw formats if OIIO can't load them directly
+    '''
+    global temp_dirs
+
+    # Raw camera files require special handling
+    imageExtension = os.path.splitext( imagePath )[-1][1:].lower()
+    if imageExtension in rawExtensions:
+
+        # Either OIIO can read the data directly
+        if oiioSupportsRaw():
+            print( "\tUsing OIIO ImageInput to read raw file" )
+
+            # Convert gamut number to text
+            gamuts = { 
+                0 : "raw", 
+                1 : "sRGB",
+                2 : "Adobe",
+                3 : "Wide",
+                4 : "ProPhoto",
+                5 : "XYZ"
+            }
+            outputGamutText = "sRGB"
+            if outputGamut in gamuts:
+                outputGamutText = gamuts[outputGamut]
+
+            # Spec will be used to configure the file read
+            spec = ImageSpec()
+            spec.attribute("raw:ColorSpace", outputGamutText)
+
+            # Read the image using ImageInput
+            inputImage = ImageInput.open( imagePath, spec )
+            width = inputImage.spec().width
+            height = inputImage.spec().height
+            nchannels = inputImage.spec().nchannels
+            sourceData = inputImage.read_image()
+
+            # Initialize an ImageBuf and copy over the pixels
+            imageBuffer = ImageBuf( inputImage.spec() )
+            roi = ROI(0, width, 0, height, 0, 1, 0, nchannels)
+            imageBuffer.set_pixels( roi, sourceData )
+
+        # Or we need to use dcraw to help the process along
+        else:
+            print( "\tUsing dcraw to convert raw, then OIIO to read file" )
+
+            # Create a new temp dir for each image so there's no chance
+            # of a name collision
+            temp_dir = tempfile.mkdtemp()
+            temp_dirs.append( temp_dir )
+
+            imageName = os.path.split(imagePath)[-1]
+            temp_file = os.path.join(temp_dir, "%s_temp.tiff" % imageName)
+
+            if outputGamut is None:
+                outputGamut = 1
+
+            cmd = "dcraw"
+            args  = []
+            #args += ['-v']
+            args += ['-w', '-o', str(outputGamut), '-4', '-T', '-W', '-c']
+            args += [imagePath]
+
+            cmdargs = [cmd]
+            cmdargs.extend(args)
+
+            #print( "\tTemp_file : %s" % temp_file )
+            print( "\tCommand   : %s" % " ".join(cmdargs) )
+
+            with open(temp_file, "w") as temp_handle:
+                process = sp.Popen(cmdargs, stdout=temp_handle, stderr=sp.STDOUT)
+                process.wait()
+
+            #print( "Loading   : %s" % temp_file )
+            imageBuffer = ImageBuf( temp_file )
+
+    # Just load the image using OIIO
+    else:
+        #print( "Using OIIO ImageBuf read route" )
+        imageBuffer = ImageBuf( imagePath )
+
+    return imageBuffer
+
 
 #
 # Use OIIO ImageBuf processing
@@ -296,12 +419,15 @@ def findBaseExposureIndexMultithreaded(inputPaths, width, height, channels, mult
 
     return highestWeightIndex
 
-def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex, writeIntermediate=False):
+def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex, 
+    writeIntermediate=False, outputGamut=1):
     '''
     Create an HDR image from a series of individual exposures
     If the images are non-linear, a series of response LUTs can be used to
     linearize the data
     '''
+
+    global temp_dirs
 
     # Create buffers for inputs
     inputBuffers = []
@@ -311,7 +437,7 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex, writeInte
     for inputPath in inputPaths:
         print( "Reading input image : %s" % inputPath )
         # Read
-        inputBufferRaw = ImageBuf( inputPath )
+        inputBufferRaw = loadImageBuffer( inputPath, outputGamut=outputGamut )
 
         # Reset the orientation
         ImageBufReorient(inputBufferRaw, inputBufferRaw.orientation)
@@ -326,8 +452,13 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex, writeInte
         # Get exposure-specific information
         exposure = getExposureInformation(metadata)
 
-        print( "\tAttributes : %s, %s, %s, %s, %s, %s" % (channelType, width, height, channels, orientation, len(metadata)) )
-        print( "\tExposure   : %s" % (exposure) )
+        print( "\tChannel Type : %s" % (channelType) )
+        print( "\tWidth        : %s" % (width) )
+        print( "\tHeight       : %s" % (height) )
+        print( "\tChannels     : %s" % (channels) )
+        print( "\tOrientation  : %s" % (orientation) )
+        print( "\tMetadata #   : %s" % (len(metadata)) )
+        print( "\tExposure     : %s" % (exposure) )
 
         # Store pixels and image attributes
         inputBuffers.append( inputBufferHalf )
@@ -335,7 +466,6 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex, writeInte
 
     # Get the base exposure information
     # All other images will be scaled to match this exposure
-    print( "Base Exposure Index : %d" % baseExposureIndex )
     if baseExposureIndex >= 0:
         baseExposureIndex = max(0, min(len(inputPaths)-1, baseExposureIndex))
     else:
@@ -471,6 +601,12 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex, writeInte
     print( "Writing result : %s" % outputPath )
     ImageBufWrite(imageSum, outputPath)
 
+    # Clean up temp folders
+    for temp_dir in temp_dirs:
+        #print( "Removing : %s" % temp_dir )
+        shutil.rmtree(temp_dir)
+
+
 #
 # Exposure information hdr generation
 #
@@ -518,7 +654,8 @@ def mergeHDRGroup(imageUris,
     writeIntermediate = False,
     responseLUTPath = None,
     baseExposureIndex = None,
-    outputPath = None):
+    outputPath = None,
+    outputGamut = 1):
     print( "" )
     print( "Merge images into an HDR - begin" )
     print( "" )
@@ -539,7 +676,8 @@ def mergeHDRGroup(imageUris,
         luts = [responseLUTPath]
 
     # Merge the HDR images
-    mkhdr(outputPath, imageUris, luts, baseExposureIndex, writeIntermediate)
+    mkhdr(outputPath, imageUris, luts, baseExposureIndex, writeIntermediate,
+        outputGamut=outputGamut)
 
     print( "" )
     print( "Merge images into an HDR - end" )
@@ -549,14 +687,18 @@ def mergeHDRFolder(hdrDir,
     responseLUTPath = None,
     writeIntermediate = False, 
     baseExposureIndex = None,
-    outputPath = None):
+    outputPath = None,
+    outputGamut = 1):
     startingDir = os.getcwd()
 
     print( "mergeHDRFolder - folder : %s" % hdrDir )
 
     try:
+        extensions = generalExtensions
+        extensions.extend( rawExtensions )
+
         imageUris = sorted( os.listdir( hdrDir ) )
-        imageUris = [x for x in imageUris if os.path.splitext(x)[-1].lower() in ['.jpg', '.cr2']]
+        imageUris = [x for x in imageUris if os.path.splitext(x)[-1].lower()[1:] in extensions]
 
         print( "mergeHDRFolder - images : %s" % imageUris )
 
@@ -565,10 +707,13 @@ def mergeHDRFolder(hdrDir,
             responseLUTPath = responseLUTPath,
             writeIntermediate = writeIntermediate,
             baseExposureIndex = baseExposureIndex,
-            outputPath = outputPath )
+            outputPath = outputPath,
+            outputGamut = outputGamut )
     except Exception, e:
         print( "Exception in HDR merging" )
-        print( repr(e) )
+        print( '-'*60 )
+        traceback.print_exc()
+        print( '-'*60 )
 
     os.chdir( startingDir )
 
@@ -593,6 +738,8 @@ def main():
     p.add_option('--baseExposure', '-b', default=-1, type='int')
     p.add_option('--writeIntermediate', '-w', action="store_true")
     p.add_option('--verbose', '-v', action="store_true")
+    p.add_option('--gamut', '-g', default=1, type='int',
+        help="[0-5], Default 1, Output gamut : raw, sRGB, Adobe, Wide, ProPhoto, XYZ")
 
     options, arguments = p.parse_args()
 
@@ -606,6 +753,7 @@ def main():
     writeIntermediate = options.writeIntermediate == True
     verbose = options.verbose == True
     baseExposureIndex = options.baseExposure
+    gamut = options.gamut
 
     try:
         argsStart = sys.argv.index('--') + 1
@@ -623,7 +771,8 @@ def main():
             responseLUTPath = responseLUTPath,
             writeIntermediate = writeIntermediate, 
             baseExposureIndex = baseExposureIndex,
-            outputPath = outputPath)
+            outputPath = outputPath,
+            outputGamut = gamut)
 
     # Process an explicit list of files
     else:
@@ -631,7 +780,8 @@ def main():
             responseLUTPath = responseLUTPath,
             writeIntermediate = writeIntermediate,
             baseExposureIndex = baseExposureIndex,
-            outputPath = outputPath)
+            outputPath = outputPath,
+            outputGamut = gamut)
 
  # main
 
