@@ -69,8 +69,7 @@ def oiioSupportsRaw():
     raw_plugin_present = 'raw' in format_list
 
     # Check to see if version is above when raw reading was fixed
-    # Update this version number to reflect when the functionality is fixed
-    version_great_enough = oiio.VERSION >= 10800
+    version_great_enough = oiio.VERSION >= 10707
 
     return (raw_plugin_present and version_great_enough)
 
@@ -104,22 +103,18 @@ def loadImageBuffer( imagePath, outputGamut=None ):
             # Spec will be used to configure the file read
             spec = ImageSpec()
             spec.attribute("raw:ColorSpace", outputGamutText)
+            spec.attribute("raw:use_camera_wb", 1)
+            spec.attribute("raw:auto_bright", 0)
+            spec.attribute("raw:use_camera_matrix", 0)
+            spec.attribute("raw:adjust_maximum_thr", 0.0)
 
-            # Read the image using ImageInput
-            inputImage = ImageInput.open( imagePath, spec )
-            width = inputImage.spec().width
-            height = inputImage.spec().height
-            nchannels = inputImage.spec().nchannels
-            sourceData = inputImage.read_image()
-
-            # Initialize an ImageBuf and copy over the pixels
-            imageBuffer = ImageBuf( inputImage.spec() )
-            roi = ROI(0, width, 0, height, 0, 1, 0, nchannels)
-            imageBuffer.set_pixels( roi, sourceData )
+            # Read the image using the adjusted spec
+            imageBuffer = oiio.ImageBuf()
+            imageBuffer.reset(imagePath, 0, 0, spec)
 
         # Or we need to use dcraw to help the process along
         else:
-            print( "\tUsing dcraw to convert raw, then OIIO to read file" )
+            print( "\tUsing dcraw to convert raw, then OIIO to read temp file" )
 
             # Create a new temp dir for each image so there's no chance
             # of a name collision
