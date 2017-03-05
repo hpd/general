@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 #
-# Copyright (c) 2016 Haarm-Pieter Duiker <hpd1@duikerresearch.com>
+# Copyright (c) 2016-2017 Haarm-Pieter Duiker <hpd1@duikerresearch.com>
 #
 
 import math
@@ -94,7 +94,8 @@ def loadImageBuffer( imagePath, outputGamut=None ):
                 2 : "Adobe",
                 3 : "Wide",
                 4 : "ProPhoto",
-                5 : "XYZ"
+                5 : "XYZ",
+                6 : "ACES",
             }
             outputGamutText = "sRGB"
             if outputGamut in gamuts:
@@ -734,7 +735,7 @@ def main():
     p.add_option('--writeIntermediate', '-w', action="store_true")
     p.add_option('--verbose', '-v', action="store_true")
     p.add_option('--gamut', '-g', default=1, type='int',
-        help="[0-5], Default 1, Output gamut : raw, sRGB, Adobe, Wide, ProPhoto, XYZ")
+        help="[0-6], Default 1 (sRGB), Output gamut : raw, sRGB, Adobe, Wide, ProPhoto, XYZ, ACES")
 
     options, arguments = p.parse_args()
 
