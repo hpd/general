@@ -1,0 +1,55 @@
+#! /Applications/TheFoundry/Nuke10.0v1/Nuke10.0v1.app/Contents/MacOS//libnuke-10.0.1.dylib -nx
+version 10.0 v1
+Gizmo {
+ addUserKnob {20 User}
+ addUserKnob {41 channels T ColorMatrixInternal1.channels}
+ addUserKnob {41 matrix T ColorMatrixInternal1.matrix}
+ addUserKnob {41 invert T ColorMatrixInternal1.invert}
+ addUserKnob {26 "" l mask}
+ addUserKnob {41 maskChannelMask l "" -STARTLINE T ColorMatrixInternal1.maskChannelMask}
+ addUserKnob {41 maskChannelInput l "" -STARTLINE T ColorMatrixInternal1.maskChannelInput}
+ addUserKnob {41 inject T ColorMatrixInternal1.inject}
+ addUserKnob {41 invert_mask l invert T ColorMatrixInternal1.invert_mask}
+ addUserKnob {41 fringe T ColorMatrixInternal1.fringe}
+ addUserKnob {41 unpremult l "(un)premult by" T ColorMatrixInternal1.unpremult}
+ addUserKnob {41 invert_unpremult l invert T ColorMatrixInternal1.invert_unpremult}
+ addUserKnob {41 mix T ColorMatrixInternal1.mix}
+ addUserKnob {26 ""}
+ addUserKnob {41 LoadSPI l "Load SPI Matrix" T ColorMatrixInternal1.LoadSPI}
+ addUserKnob {41 SaveSPI l "Save SPI Matrix" T ColorMatrixInternal1.SaveSPI}
+ addUserKnob {41 DupeToOCIO l "Duplicate as OCIO File Transform" T ColorMatrixInternal1.DupeToOCIO}
+ addUserKnob {41 DivideByDeterminant l "Divide By Determinant" T ColorMatrixInternal1.DivideByDeterminant}
+ addUserKnob {41 CombineMatrices l "Combine with other Matrix" T ColorMatrixInternal1.CombineMatrices}
+ addUserKnob {41 CopyMatrix l "Copy Values From Selected Node" T ColorMatrixInternal1.CopyMatrix}
+}
+ Input {
+  inputs 0
+  name Input1
+  xpos -70
+  ypos -127
+ }
+ ColorMatrix {
+  matrix {
+      {1 0 0}
+      {0 1 0}
+      {0 0 1}
+    }
+  name ColorMatrixInternal1
+  selected true
+  xpos -70
+  ypos -57
+  addUserKnob {20 User}
+  addUserKnob {22 LoadSPI l "Load SPI Matrix" T "def loadSPIMatrix(spiFile, matrixNode):\n    with open( spiFile, 'r') as file:\n        lines = file.readlines()\n    \n    matrixValues = \[]\n    for line in lines:\n        matrixValues.extend( map(float, line.strip().split(' ')\[0:3]) )\n    matrixNode\['matrix'].setValue(matrixValues)\n\nspiFile = filePath = nuke.getFilename('Save Matrix', '*.spimtx *.spimtx')\nselectedNode = nuke.selectedNode()\nloadSPIMatrix( spiFile, selectedNode )\n" +STARTLINE}
+  addUserKnob {22 SaveSPI l "Save SPI Matrix" T "def writeSPIColorMatrix(matrixNode, spiFile):\n    matrixValues = matrixNode\['matrix'].getValue()\n    \n    with open(spiFile, \"w\") as spiFileHandle:\n        spiFileHandle.write( \"%3.6f %3.6f %3.6f 0.0\\n\" % (\n            matrixValues\[0], matrixValues\[1], matrixValues\[2]) )\n        spiFileHandle.write( \"%3.6f %3.6f %3.6f 0.0\\n\" % (\n            matrixValues\[3], matrixValues\[4], matrixValues\[5]) )\n        spiFileHandle.write( \"%3.6f %3.6f %3.6f 0.0\\n\" % (\n            matrixValues\[6], matrixValues\[7], matrixValues\[8]) )\n\nfilePath = nuke.getFilename('Save Matrix', '*.spimtx *.spimtx')\nselectedNode = nuke.selectedNode()\n\nprint( \"Exporting matrix node : %s\" % selectedNode)\nprint( \"Exporting matrix to : %s\" % filePath)\n\nwriteSPIColorMatrix(selectedNode, filePath)\n" +STARTLINE}
+  addUserKnob {22 DupeToOCIO l "Duplicate as OCIO File Transform" T "def writeSPIColorMatrix(matrixNode, spiFile):\n    matrixValues = matrixNode\['matrix'].getValue()\n    \n    with open(spiFile, \"w\") as spiFileHandle:\n        spiFileHandle.write( \"%3.6f %3.6f %3.6f 0.0\\n\" % (\n            matrixValues\[0], matrixValues\[1], matrixValues\[2]) )\n        spiFileHandle.write( \"%3.6f %3.6f %3.6f 0.0\\n\" % (\n            matrixValues\[3], matrixValues\[4], matrixValues\[5]) )\n        spiFileHandle.write( \"%3.6f %3.6f %3.6f 0.0\\n\" % (\n            matrixValues\[6], matrixValues\[7], matrixValues\[8]) )\n\nfilePath = nuke.getFilename('Save Matrix', '*.spimtx *.spimtx')\nselectedNode = nuke.selectedNode()\n\nprint( \"Exporting matrix node : %s\" % selectedNode)\nprint( \"Exporting matrix to : %s\" % filePath)\n\nwriteSPIColorMatrix(selectedNode, filePath)\n\nwith nuke.root():\n    nukeMatrixNode = nuke.createNode (\"OCIOFileTransform\")\nnukeMatrixNode\['file'].setValue(filePath)\nnukeMatrixNode\['working_space'].setValue(\"raw\")\n" +STARTLINE}
+  addUserKnob {26 ""}
+  addUserKnob {22 DivideByDeterminant l "Divide By Determinant" T "import math\nimport math\ndef normalizeMatrix(matrixNode):\n    nukeMatrix3 = nodeToMatrix3(matrixNode)\n\n    determinant = nukeMatrix3.determinant()\n    print( \"det  : %s\" % determinant )\n    determinant_root = math.pow( math.fabs(determinant), 0.333333 )\n    print( \"det root : %s\" % determinant_root )\n            \n    nukeMatrix3.scale( 1.0/determinant_root )\n\n    matrixValues = \[]\n    for i in range(9):\n        matrixValues.append(nukeMatrix3\[i])\n    matrixNode\['matrix'].setValue(matrixValues)\n\nselectedNode = nuke.selectedNode()\nnormalizeMatrix( selectedNode )" +STARTLINE}
+  addUserKnob {22 CombineMatrices l "Combine with other Matrix" T "def nodeToMatrix3(matrixNode):\n    matrixValues = matrixNode\['matrix'].getValue()\n    nukeMatrix3 = nuke.math.Matrix3()\n    for i in range(9):\n        nukeMatrix3\[i] = matrixValues\[i]\n    return nukeMatrix3\n\ndef matrix3ToNode(nukeMatrix3):\n    matrixValues = \[]\n    for i in range(9):\n        matrixValues.append(nukeMatrix3\[i])\n\n    with nuke.root():\n        nukeMatrixNode = nuke.createNode (\"ColorMatrixPlus\")\n    nukeMatrixNode\['matrix'].setValue(matrixValues)\n    return nukeMatrixNode\n\ndef combineMatrixNodesNuke(matrixNodes=None):\n    if matrixNodes == None:\n        selectedNodes = nuke.selectedNodes()\n        matrixNodes = \[]\n        matrixNode\[0] = selectedNodes\[0]\n        matrixNode\[1] = selectedNodes\[1]\n\n    a = nodeToMatrix3(matrixNodes\[0])\n    b = nodeToMatrix3(matrixNodes\[1])\n\n    invertMatrix = matrixNodes\[0]\['invert'].getValue()\n    if invertMatrix > 0.0:\n        a = a.inverse()\n    invertMatrix = matrixNodes\[1]\['invert'].getValue()\n    if invertMatrix > 0.0:\n        b = b.inverse()\n    \n    c = a * b\n\n    combinedMatrixNode = matrix3ToNode(c)\n\nselectedNodes = nuke.root().selectedNodes()\n#selectedNodes = nuke.selectedNodes()\nprint( selectedNodes )\ncombineMatrixNodesNuke(\[selectedNodes\[0], selectedNodes\[1]])" +STARTLINE}
+  addUserKnob {22 CopyMatrix l "Copy Values From Selected Node" T "def nodeToMatrix3(matrixNode):\n    matrixValues = matrixNode\['matrix'].getValue()\n    nukeMatrix3 = nuke.math.Matrix3()\n    for i in range(9):\n        nukeMatrix3\[i] = matrixValues\[i]\n    return nukeMatrix3\n\ndef matrix3ToNode(nukeMatrix3):\n    matrixValues = \[]\n    for i in range(9):\n        matrixValues.append(nukeMatrix3\[i])\n\n    with nuke.root():\n        nukeMatrixNode = nuke.createNode (\"matrixplus\")\n    nukeMatrixNode\['matrix'].setValue(matrixValues)\n    return nukeMatrixNode\n\n\nselectedNode = nuke.root().selectedNode()\nmatrixValues = nodeToMatrix3(selectedNode)\nthisNode = nuke.thisNode()\nthisNode\['matrix'].setValue(matrixValues)" +STARTLINE}
+ }
+ Output {
+  name Output1
+  xpos -70
+  ypos 13
+ }
+end_group

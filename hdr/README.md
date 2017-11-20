@@ -4,8 +4,7 @@ A simple HDR exposure merging script based on OpenImageIO and Python
 
 Dependencies
 -
-The *Python* configuration generation package depends on the following
-libraries:
+This *Python* script depends on the following libraries:
 
 - **OpenImageIO**: http://openimageio.org
     - Detailed build instructions can be found here: [OpenImageIO Build Instructions](https://sites.google.com/site/openimageio/checking-out-and-building-openimageio)
