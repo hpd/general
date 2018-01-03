@@ -2,9 +2,15 @@
 # -*- coding: utf-8 -*-
 
 #
-# Copyright (c) 2016-2017 Haarm-Pieter Duiker <hpd1@duikerresearch.com>
+# Copyright (c) 2016 Haarm-Pieter Duiker <hpd1@duikerresearch.com>
 #
 
+try:
+    import cv2
+except:
+    cv2 = None
+
+import array
 import math
 import numpy as np
 import os
@@ -31,31 +37,6 @@ rawExtensions = ["bay", "bmq", "cr2", "crw", "cs1", "dc2", "dcr", "dng",
     "ptx", "cap", "iiq", "rwz"]
 
 #
-# LUT related functions
-#
-def loadResponse( response ):
-    '''
-    Extremely simple / fragile reader for the Sony spi1d format
-    '''
-    with open(response) as f:
-         content = f.readlines()
-         content = [x.strip('\n').strip() for x in content]
-    
-    entries = len(content)-6
-    channels = len(content[6].split())
-    
-    #print( "entries : %d, channels : %d" % (entries, channels) )
-    
-    lut = np.zeros((channels, entries), dtype=np.float32)    
-    
-    for i in range(5,len(content)-1):
-        values = content[i].split()
-        for c in range(channels):
-            lut[c][i-5] = float(values[c])
-    
-    return lut
-
-#
 # Workaround for OIIO libRaw support
 #
 temp_dirs = []
@@ -69,11 +50,13 @@ def oiioSupportsRaw():
     raw_plugin_present = 'raw' in format_list
 
     # Check to see if version is above when raw reading was fixed
+    # Update this version number to reflect when the functionality is fixed
     version_great_enough = oiio.VERSION >= 10707
 
     return (raw_plugin_present and version_great_enough)
 
-def loadImageBuffer( imagePath, outputGamut=None ):
+def loadImageBuffer( imagePath, outputGamut=None, rawSaturationPoint=-1.0,
+    dcrawVariant=None ):
     '''
     Load an image buffer. Manage raw formats if OIIO can't load them directly
     '''
@@ -94,8 +77,7 @@ def loadImageBuffer( imagePath, outputGamut=None ):
                 2 : "Adobe",
                 3 : "Wide",
                 4 : "ProPhoto",
-                5 : "XYZ",
-                6 : "ACES",
+                5 : "XYZ"
             }
             outputGamutText = "sRGB"
             if outputGamut in gamuts:
@@ -109,13 +91,12 @@ def loadImageBuffer( imagePath, outputGamut=None ):
             spec.attribute("raw:use_camera_matrix", 0)
             spec.attribute("raw:adjust_maximum_thr", 0.0)
 
-            # Read the image using the adjusted spec
-            imageBuffer = oiio.ImageBuf()
-            imageBuffer.reset(imagePath, 0, 0, spec)
+            imageBuffer = ImageBuf()
+            imageBuffer.reset( imagePath, 0, 0, spec )
 
         # Or we need to use dcraw to help the process along
         else:
-            print( "\tUsing dcraw to convert raw, then OIIO to read temp file" )
+            print( "\tUsing dcraw to convert raw, then OIIO to read file" )
 
             # Create a new temp dir for each image so there's no chance
             # of a name collision
@@ -128,21 +109,49 @@ def loadImageBuffer( imagePath, outputGamut=None ):
             if outputGamut is None:
                 outputGamut = 1
 
-            cmd = "dcraw"
-            args  = []
-            #args += ['-v']
-            args += ['-w', '-o', str(outputGamut), '-4', '-T', '-W', '-c']
-            args += [imagePath]
+            if dcrawVariant == "dcraw":
+                cmd = "dcraw"
+                args  = []
+                #args += ['-v']
+                args += ['-w', '-o', str(outputGamut), '-4', '-T', '-W']
+                args += ['-c']
+                if rawSaturationPoint > 0.0:
+                    args += ['-S', str(int(rawSaturationPoint))]
+                args += [imagePath]
 
-            cmdargs = [cmd]
-            cmdargs.extend(args)
+                cmdargs = [cmd]
+                cmdargs.extend(args)
 
-            #print( "\tTemp_file : %s" % temp_file )
-            print( "\tCommand   : %s" % " ".join(cmdargs) )
+                #print( "\tTemp_file : %s" % temp_file )
+                print( "\tCommand   : %s" % " ".join(cmdargs) )
 
-            with open(temp_file, "w") as temp_handle:
-                process = sp.Popen(cmdargs, stdout=temp_handle, stderr=sp.STDOUT)
+                with open(temp_file, "w") as temp_handle:
+                    process = sp.Popen(cmdargs, stdout=temp_handle, stderr=sp.STDOUT)
+                    process.wait()
+
+            # Use the libraw dcraw_emu when dcraw doesn't support a camera yet
+            else:
+                cmd = "dcraw_emu"
+                args  = []
+                args += ['-w', '-o', str(outputGamut), '-4', '-T', '-W']
+
+                #if rawSaturationPoint > 0.0:
+                #    args += ['-c', str(float(rawSaturationPoint/16384.0))]
+                if rawSaturationPoint > 0.0:
+                    args += ['-S', str(int(rawSaturationPoint))]
+                args += [imagePath]
+
+                cmdargs = [cmd]
+                cmdargs.extend(args)
+
+                print( "\tCommand   : %s" % " ".join(cmdargs) )
+
+                dcraw_emu_temp_file = "%s.tiff" % imageName
+                process = sp.Popen(cmdargs, stderr=sp.STDOUT)
                 process.wait()
+
+                print( "\tMoving temp file to : %s" % temp_dir )
+                shutil.move( dcraw_emu_temp_file, temp_file )
 
             #print( "Loading   : %s" % temp_file )
             imageBuffer = ImageBuf( temp_file )
@@ -206,10 +215,31 @@ def ImageBufMakeConstant(xres,
 
     return b
 
-def ImageBufWrite(imageBuf, filename, format=oiio.UNKNOWN):
+def ImageBufWrite(imageBuf, 
+    filename, 
+    format=oiio.UNKNOWN,
+    compression=None,
+    compressionQuality=0,
+    metadata=None,
+    additionalAttributes=None):
     '''
     Write an Image Buffer
     '''
+    outputSpec = imageBuf.specmod()
+    if compression:
+        outputSpec.attribute("compression", compression)
+            
+        if compressionQuality > 0:
+            outputSpec.attribute("CompressionQuality", compressionQuality)
+
+    if metadata:
+        for attr in metadata:
+            outputSpec.attribute(attr.name, attr.value)
+
+    if additionalAttributes:
+        for key, value in additionalAttributes.iteritems():
+            outputSpec.attribute("mkhdr:%s" % key, str(value))
+
     if not imageBuf.has_error:
         imageBuf.set_write_format( format )
         imageBuf.write( filename )
@@ -415,8 +445,216 @@ def findBaseExposureIndexMultithreaded(inputPaths, width, height, channels, mult
 
     return highestWeightIndex
 
-def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex, 
-    writeIntermediate=False, outputGamut=1):
+def OpenCVImageBufferFromOIIOImageBuffer(oiioImageBuffer):
+    oiioSpec = oiioImageBuffer.spec()
+    (width, height, channels) = (oiioSpec.width, oiioSpec.height, oiioSpec.nchannels)
+    oiioFormat = oiioSpec.format
+    oiioChanneltype = oiioFormat.basetype
+
+    # Promote halfs to full float as Python may not handle those properly
+    if oiioChanneltype == oiio.BASETYPE.HALF:
+        oiioChanneltype = oiio.BASETYPE.FLOAT
+
+    oiioToNPBitDepth = {
+        oiio.BASETYPE.UINT8  : np.uint8,
+        oiio.BASETYPE.UINT16 : np.uint16,
+        oiio.BASETYPE.UINT32 : np.uint32,
+        oiio.BASETYPE.HALF   : np.float16,
+        oiio.BASETYPE.FLOAT  : np.float32,
+        oiio.BASETYPE.DOUBLE : np.float64,
+    }
+
+    # Default to float
+    if oiioChanneltype in oiioToNPBitDepth:
+        npChannelType = oiioToNPBitDepth[oiioChanneltype]
+    else:
+        print( "oiio to opencv - Using fallback bit depth" )
+        npChannelType = np.float32
+
+    opencvImageBuffer = np.array(oiioImageBuffer.get_pixels(oiioChanneltype), dtype=npChannelType).reshape(height, width, channels)
+
+    return opencvImageBuffer
+
+def OIIOImageBufferFromOpenCVImageBuffer(opencvImageBuffer):
+    (height, width, channels) = opencvImageBuffer.shape
+    npChanneltype = opencvImageBuffer.dtype
+
+    npToArrayBitDepth = {
+        np.dtype('uint8')   : 'B',
+        np.dtype('uint16')  : 'H',
+        np.dtype('uint32')  : 'I',
+        np.dtype('float32') : 'f',
+        np.dtype('float64') : 'd',
+    }
+
+    npToOIIOBitDepth = {
+        np.dtype('uint8')   : oiio.BASETYPE.UINT8,
+        np.dtype('uint16')  : oiio.BASETYPE.UINT16,
+        np.dtype('uint32')  : oiio.BASETYPE.UINT32,
+        np.dtype('float32') : oiio.BASETYPE.FLOAT,
+        np.dtype('float64') : oiio.BASETYPE.DOUBLE,
+    }
+
+    # Support this when oiio more directly integrates with numpy
+    #    np.dtype('float16') : oiio.BASETYPE.HALF,
+
+    if (npChanneltype in npToArrayBitDepth and 
+        npChanneltype in npToOIIOBitDepth):
+        arrayChannelType = npToArrayBitDepth[npChanneltype]
+        oiioChanneltype = npToOIIOBitDepth[npChanneltype]
+    else:
+        print( "opencv to oiio - Using fallback bit depth" )
+        arrayChannelType = 'f'
+        oiioChanneltype = oiio.BASETYPE.FLOAT
+
+    spec = ImageSpec(width, height, channels, oiioChanneltype)
+    oiioImageBuffer = ImageBuf(spec)
+    roi = oiio.ROI(0, width, 0, height, 0, 1, 0, channels)
+    conversion = oiioImageBuffer.set_pixels( roi, array.array(arrayChannelType, opencvImageBuffer.flatten()) )
+    if not conversion:
+        print( "opencv to oiio - Error converting the OpenCV buffer to an OpenImageIO buffer" )
+        oiioImageBuffer = None
+
+    return oiioImageBuffer
+
+def find2dAlignmentMatrix(im1, im2, 
+    warp_mode = cv2.MOTION_TRANSLATION, 
+    center_crop_resolution=0,
+    brightness_scale=1.0):
+    '''
+    # Define the motion model
+    warp_mode = cv2.MOTION_TRANSLATION
+    warp_mode = cv2.MOTION_EUCLIDEAN
+    warp_mode = cv2.MOTION_AFFINE
+    warp_mode = cv2.MOTION_HOMOGRAPHY
+    '''
+
+    #width, height, channels,
+
+    warpModeToText = { 
+        0 : 'Translation',
+        1 : 'Euclidean',
+        2 : 'Affine', 
+        3 : 'Homography'
+    }
+
+    scale_factor = 1.0
+
+    # Convert to from OIIO to OpenCV-friendly format
+    res1 = OpenCVImageBufferFromOIIOImageBuffer(im1)
+    res2 = OpenCVImageBufferFromOIIOImageBuffer(im2)
+
+    (height, width, channels) = res1.shape
+
+    if center_crop_resolution >= 0:
+        if center_crop_resolution == 0:
+            center_crop_resolution = min(width, height)/2
+
+        if width > center_crop_resolution:
+            print( width, height )
+            ws = width/2 - center_crop_resolution/2
+            we = width/2 + center_crop_resolution/2
+            hs = height/2 - center_crop_resolution/2
+            he = height/2 + center_crop_resolution/2
+
+            print( "Center crop : %d-%d, %d-%d" % (ws, we, hs, he) )
+            print( "Cropping image 1")
+            res1 = res1[hs:he, ws:we]
+            print( "Cropping image 2")
+            res2 = res2[hs:he, ws:we]
+            scale_factor = 1.0
+
+    #print( res1.shape )
+    #print( res2.shape )
+
+    # Scale image1 - Not entirely necessary
+    res1 = cv2.multiply(res1, np.array([brightness_scale]))
+    
+    # Convert images to grayscale
+    #if len(im1shape) > 2:
+    if channels > 1:
+        im1_gray = cv2.cvtColor(res1,cv2.COLOR_BGR2GRAY)
+        im2_gray = cv2.cvtColor(res2,cv2.COLOR_BGR2GRAY)
+    else:
+        im1_gray = res1
+        im2_gray = res2
+
+    # Define 2x3 or 3x3 matrices and initialize the matrix to identity
+    if warp_mode == cv2.MOTION_HOMOGRAPHY :
+        warp_matrix = np.eye(3, 3, dtype=np.float32)
+    else :
+        warp_matrix = np.eye(2, 3, dtype=np.float32)
+
+    # Specify the number of iterations.
+    number_of_iterations = 5000;
+    
+    # Specify the threshold of the increment
+    # in the correlation coefficient between two iterations
+    termination_eps = 1e-10;
+    
+    # Define termination criteria
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, number_of_iterations,  termination_eps)
+
+    print( "Aligning - Mode : %s, %d" % (warpModeToText[warp_mode], warp_mode) )
+
+    #cv2.imwrite("im1_gray.exr", im1_gray)
+    #cv2.imwrite("im2_gray.exr", im2_gray)
+
+    # Run the ECC algorithm. The results are stored in warp_matrix.
+    try:
+        (cc, warp_matrix) = cv2.findTransformECC (im1_gray, im2_gray, warp_matrix, warp_mode, criteria)
+    except Exception, e:
+        print( "Exception in findTransformECC : %s" % repr(e))
+        warp_matrix = [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+
+    w = len(warp_matrix[0])
+    h = len(warp_matrix)
+    print( "Alignment Matrix - %d x %d" % (w, h) )
+    for j in range(h):
+        print( map(lambda x: "%3.6f" % x, warp_matrix[j]) )
+    #print( "Alignment Matrix : %s" % warp_matrix )
+    print( "Translation" )
+    for j in range(h):
+        print( "%3.6f" % (float(warp_matrix[j][-1])*scale_factor) )
+
+    # OpenCV warp
+    '''
+    print( "OpenCV warp" )
+    sz = im1_gray.shape
+    if warp_mode == cv2.MOTION_HOMOGRAPHY :
+        # Use warpPerspective for Homography
+        im2_aligned = cv2.warpPerspective (im2, warp_matrix, (sz[1],sz[0]), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP)
+    else :
+        # Use warpAffine for Translation, Euclidean and Affine
+        im2_aligned = cv2.warpAffine(res2, warp_matrix, (sz[1],sz[0]), flags=cv2.INTER_LINEAR + cv2.WARP_INVERSE_MAP);
+
+    output = "test.exr"
+    print( "Writing output : %s" % output )
+    cv2.imwrite(output, im2_aligned)
+    '''
+
+    return warp_matrix
+
+class Logger(object):
+    def __init__(self):
+        self.terminal = sys.stdout
+        self.log = []
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.append(message)
+
+def mkhdr(outputPath, 
+    inputPaths, 
+    responseLUTPaths, 
+    baseExposureIndex, 
+    writeIntermediate = False, 
+    outputGamut = 1,
+    compression = None,
+    compressionQuality = 0,
+    rawSaturationPoint = -1.0,
+    alignImages = False,
+    dcrawVariant = None):
     '''
     Create an HDR image from a series of individual exposures
     If the images are non-linear, a series of response LUTs can be used to
@@ -424,6 +662,11 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex,
     '''
 
     global temp_dirs
+
+    # Set up capture of 
+    old_stdout, old_stderr = sys.stdout, sys.stderr
+    redirected_stdout = sys.stdout = Logger()
+    redirected_stderr = sys.stderr = Logger()
 
     # Create buffers for inputs
     inputBuffers = []
@@ -433,9 +676,12 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex,
     for inputPath in inputPaths:
         print( "Reading input image : %s" % inputPath )
         # Read
-        inputBufferRaw = loadImageBuffer( inputPath, outputGamut=outputGamut )
+        inputBufferRaw = loadImageBuffer( inputPath, outputGamut=outputGamut, 
+            rawSaturationPoint=rawSaturationPoint,
+            dcrawVariant=dcrawVariant )
 
         # Reset the orientation
+        print( "\tRaw Orientation : %d" % inputBufferRaw.orientation)
         ImageBufReorient(inputBufferRaw, inputBufferRaw.orientation)
 
         # Get attributes
@@ -453,8 +699,8 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex,
         print( "\tHeight       : %s" % (height) )
         print( "\tChannels     : %s" % (channels) )
         print( "\tOrientation  : %s" % (orientation) )
-        print( "\tMetadata #   : %s" % (len(metadata)) )
         print( "\tExposure     : %s" % (exposure) )
+        print( "\tMetadata #   : %s" % (len(metadata)) )
 
         # Store pixels and image attributes
         inputBuffers.append( inputBufferHalf )
@@ -472,6 +718,7 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex,
         else:
             baseExposureIndex = findBaseExposureIndexSerial(inputBuffers, width, height, channels)
 
+    baseExposureMetadata = inputAttributes[baseExposureIndex][5]
     baseExposureInfo = inputAttributes[baseExposureIndex][6]
     baseInputspec = inputAttributes[baseExposureIndex][7]
 
@@ -520,6 +767,65 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex,
             intermediate += 1
             ImageBufWrite(color, intermediatePath)
 
+        # Find the image alignment matrix to align this exposure with the base exposure
+        if alignImages:
+            try:
+                if inputIndex != baseExposureIndex:
+                    if cv2:
+                        print( "\tAligning image %d to base exposure %d " % (inputIndex, baseExposureIndex) )
+                        warpMatrix = find2dAlignmentMatrix(inputBuffer, inputBuffers[baseExposureIndex])
+
+                        # reformat for OIIO's warp
+                        w = map(float, list(warpMatrix.reshape(1,-1)[0]))
+                        warpTuple = (w[0], w[1], 0.0, w[3], w[4], 0.0, w[2], w[5], 1.0)
+                        print( warpTuple )
+
+                        warped = ImageBuf()
+                        result = ImageBufAlgo.warp(warped, color, warpTuple)
+                        if result:
+                            print( "\tImage alignment warp succeeded." )
+                            if writeIntermediate:
+                                intermediatePath = "%s_int%d.warped%s" % (inputPathComponents[0], intermediate, inputPathComponents[1])
+                                intermediate += 1
+                                ImageBufWrite(warped, intermediatePath)
+
+                            color = warped
+                        else:
+                            print( "\tImage alignment warp failed." )
+                            if writeIntermediate:
+                                intermediate += 1
+                    else:
+                        print( "\tSkipping image alignment. OpenCV not defined" )
+                        if writeIntermediate:
+                            intermediate += 1
+                else:
+                    print( "\tSkipping alignment of base exposure to itself")
+                    if writeIntermediate:
+                        intermediate += 1
+
+            except:
+                print( "Exception in image alignment" )
+                print( '-'*60 )
+                traceback.print_exc()
+                print( '-'*60 )
+
+        # Weight
+        print( "\tComputing image weight" )
+
+        lut = []
+        if inputIndex == minExposureOffsetIndex:
+            lut.append(1)
+        if inputIndex == maxExposureOffsetIndex:
+            lut.append(2)
+        if lut:
+            print( "\tUsing LUT %s in weighting calculation" % lut )
+        ImageBufWeight(weight, color, lut=lut)
+
+        if writeIntermediate:
+            intermediatePath = "%s_int%d.weight%s" % (inputPathComponents[0], intermediate, inputPathComponents[1])
+            intermediate += 1
+            ImageBufWrite(weight, intermediatePath)
+
         # Linearize using LUTs
         if responseLUTPaths:
             for responseLUTPath in responseLUTPaths:
@@ -536,9 +842,8 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex,
         exposureAdjustment = getExposureAdjustment(inputExposureInfo, baseExposureInfo)
         exposureScale = pow(2, exposureAdjustment)
 
-        print( "\tScaling by %s stops (%s mul)" % (exposureAdjustment, exposureScale) )
-
         # Re-expose input
+        print( "\tScaling by %s stops (%s mul)" % (exposureAdjustment, exposureScale) )
         ImageBufAlgo.mul(color, color, exposureScale)
 
         if writeIntermediate:
@@ -546,27 +851,9 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex,
             intermediate += 1
             ImageBufWrite(color, intermediatePath)
 
-        print( "\tComputing image weight" )
-
-        # Weight
-        lut = []
-        if inputIndex == minExposureOffsetIndex:
-            lut.append(1)
-        if inputIndex == maxExposureOffsetIndex:
-            lut.append(2)
-        if lut:
-            print( "\tUsing LUT %s in weighting calculation" % lut )
-        weightIntermediate = intermediate if writeIntermediate else 0
-        ImageBufWeight(weight, inputBuffer, lut=lut)
-
-        if writeIntermediate:
-            intermediatePath = "%s_int%d.weight%s" % (inputPathComponents[0], intermediate, inputPathComponents[1])
-            intermediate += 1
-            ImageBufWrite(weight, intermediatePath)
-
+        # Multiply color by weight
         print( "\tMultiply by weight" )
 
-        # Multiply color by weight
         ImageBufAlgo.mul(weightedColor, weight, color)
 
         if writeIntermediate:
@@ -595,12 +882,28 @@ def mkhdr(outputPath, inputPaths, responseLUTPaths, baseExposureIndex,
 
     # Write to disk
     print( "Writing result : %s" % outputPath )
-    ImageBufWrite(imageSum, outputPath)
+
+    # Restore regular streams
+    sys.stdout, sys.stderr = old_stdout, old_stderr
+
+    additionalAttributes = {}
+    additionalAttributes['inputPaths'] = " ".join(inputPaths)
+    additionalAttributes['stdout'] = "".join(redirected_stdout.log)
+    additionalAttributes['stderr'] = "".join(redirected_stderr.log)
+
+    ImageBufWrite(imageSum, outputPath, 
+        compression=compression,
+        compressionQuality=compressionQuality,
+        metadata=baseExposureMetadata,
+        additionalAttributes=additionalAttributes)
 
     # Clean up temp folders
     for temp_dir in temp_dirs:
         #print( "Removing : %s" % temp_dir )
         shutil.rmtree(temp_dir)
+
+    for temp_dir in temp_dirs:
+        temp_dirs.remove(temp_dir)
 
 
 #
@@ -651,7 +954,12 @@ def mergeHDRGroup(imageUris,
     responseLUTPath = None,
     baseExposureIndex = None,
     outputPath = None,
-    outputGamut = 1):
+    outputGamut = 1,
+    compression = None,
+    compressionQuality = 0,
+    rawSaturationPoint = -1.0,
+    alignImages = False,
+    dcrawVariant = None):
     print( "" )
     print( "Merge images into an HDR - begin" )
     print( "" )
@@ -663,17 +971,27 @@ def mergeHDRGroup(imageUris,
     else:
         print( "Base Exposure : %s" % baseExposureIndex )
 
-    if not outputPath:
-        outputPath = "%s%s" % (os.path.splitext( imageUris[0] )[0], ".exr")
+    if os.path.isdir( outputPath ):
+        outputPath = "%s/%s%s" % (outputPath, os.path.splitext( imageUris[baseExposureIndex] )[0], ".exr")
+    elif not outputPath:
+        outputPath = "%s%s" % (os.path.splitext( imageUris[baseExposureIndex] )[0], ".exr")
 
     luts = []
     if responseLUTPath:
-        responseLUT = loadResponse( responseLUTPath )
         luts = [responseLUTPath]
 
     # Merge the HDR images
-    mkhdr(outputPath, imageUris, luts, baseExposureIndex, writeIntermediate,
-        outputGamut=outputGamut)
+    mkhdr(outputPath, 
+        imageUris, 
+        luts, 
+        baseExposureIndex, 
+        writeIntermediate,
+        outputGamut = outputGamut,
+        compression = compression,
+        compressionQuality = compressionQuality,
+        rawSaturationPoint = rawSaturationPoint,
+        alignImages = alignImages,
+        dcrawVariant = dcrawVariant)
 
     print( "" )
     print( "Merge images into an HDR - end" )
@@ -684,7 +1002,12 @@ def mergeHDRFolder(hdrDir,
     writeIntermediate = False, 
     baseExposureIndex = None,
     outputPath = None,
-    outputGamut = 1):
+    outputGamut = 1,
+    compression = None,
+    compressionQuality = 0,
+    rawSaturationPoint = -1.0,
+    alignImages = False,
+    dcrawVariant = None):
     startingDir = os.getcwd()
 
     print( "mergeHDRFolder - folder : %s" % hdrDir )
@@ -695,6 +1018,7 @@ def mergeHDRFolder(hdrDir,
 
         imageUris = sorted( os.listdir( hdrDir ) )
         imageUris = [x for x in imageUris if os.path.splitext(x)[-1].lower()[1:] in extensions]
+        imageUris = [x for x in imageUris if x[0] != '.']
 
         print( "mergeHDRFolder - images : %s" % imageUris )
 
@@ -704,7 +1028,12 @@ def mergeHDRFolder(hdrDir,
             writeIntermediate = writeIntermediate,
             baseExposureIndex = baseExposureIndex,
             outputPath = outputPath,
-            outputGamut = outputGamut )
+            outputGamut = outputGamut,
+            compression = compression,
+            compressionQuality = compressionQuality,
+            rawSaturationPoint = rawSaturationPoint,
+            alignImages = alignImages,
+            dcrawVariant = dcrawVariant)
     except Exception, e:
         print( "Exception in HDR merging" )
         print( '-'*60 )
@@ -712,6 +1041,58 @@ def mergeHDRFolder(hdrDir,
         print( '-'*60 )
 
     os.chdir( startingDir )
+
+def mergeHDRFolderMulti(hdrDir, 
+    bracketSize = 3,
+    responseLUTPath = None,
+    writeIntermediate = False, 
+    baseExposureIndex = None,
+    outputPath = None,
+    outputGamut = 1,
+    compression = None,
+    compressionQuality = 0,
+    rawSaturationPoint = -1.0,
+    alignImages = False,
+    dcrawVariant = None):
+    startingDir = os.getcwd()
+
+    print( "mergeHDRFolderMulti - folder : %s" % hdrDir )
+
+    try:
+        extensions = generalExtensions
+        extensions.extend( rawExtensions )
+
+        multiImageUris = sorted( os.listdir( str(hdrDir) ) )
+        multiImageUris = [x for x in multiImageUris if os.path.splitext(x)[-1].lower()[1:] in extensions]
+        multiImageUris = [x for x in multiImageUris if x[0] != '.']
+
+        bracketedGroups = len( multiImageUris )/bracketSize
+        for group in range( bracketedGroups ):
+            imageUris = multiImageUris[group*bracketSize:(group+1)*bracketSize]
+
+            print( "mergeHDRFolderMulti %d - images : %s" % (group, imageUris) )
+
+            os.chdir( hdrDir )
+            mergeHDRGroup( imageUris, 
+                responseLUTPath = responseLUTPath,
+                writeIntermediate = writeIntermediate,
+                baseExposureIndex = baseExposureIndex,
+                outputPath = outputPath,
+                outputGamut = outputGamut,
+                compression = compression,
+                compressionQuality = compressionQuality,
+                rawSaturationPoint = rawSaturationPoint,
+                alignImages = alignImages,
+                dcrawVariant = dcrawVariant)
+
+    except Exception, e:
+        print( "Exception in HDR merging" )
+        print( '-'*60 )
+        traceback.print_exc()
+        print( '-'*60 )
+
+    os.chdir( startingDir )
+
 
 #
 # Get the options, load a set of images and merge them
@@ -721,6 +1102,15 @@ def main():
 
     usage  = "%prog [options]\n"
     usage += "\n"
+    usage += "compression options:\n"
+    usage += " exr format compression options  : none, rle, zip, zips(default), piz, pxr24, b44, b44a, dwaa, or dwab\n"
+    usage += "   dwaa and dwab compression support depends on the version of OpenImageIO that you're using.\n"
+    usage += " tiff format compression options : none, lzw, zip(default), packbits\n"
+    usage += " tga format compression options  : none, rle\n"
+    usage += " sgi format compression options  : none, rle\n"
+    usage += "\n"
+    usage += "compression quality options:\n"
+    usage += " jpg format compression quality options  : 0 to 100\n"
 
     p = optparse.OptionParser(description='Merge a set of LDR images into a single HDR result',
                                 prog='mkhdr',
@@ -729,13 +1119,21 @@ def main():
 
     p.add_option('--input', '-i', type='string', action='append')
     p.add_option('--inputFolder', default=None)
+    p.add_option('--multiInputFolder', default=None)
+    p.add_option('--bracketSize', default=3, type='int')
     p.add_option('--output', '-o', default=None)
     p.add_option('--responseLUT', '-r', default=None)
     p.add_option('--baseExposure', '-b', default=-1, type='int')
     p.add_option('--writeIntermediate', '-w', action="store_true")
     p.add_option('--verbose', '-v', action="store_true")
     p.add_option('--gamut', '-g', default=1, type='int',
-        help="[0-6], Default 1 (sRGB), Output gamut : raw, sRGB, Adobe, Wide, ProPhoto, XYZ, ACES")
+        help="[0-5], Default 1, Output gamut : raw, sRGB, Adobe, Wide, ProPhoto, XYZ")
+    p.add_option("--compression", type='string')
+    p.add_option("--quality", type="int", dest="quality", default = -1)
+    p.add_option("--rawSaturationPoint", '-s', type="float", default = -1.0)
+    p.add_option('--alignImages', '-a', action="store_true")
+    p.add_option('--dcraw', default='dcraw_emu', type='string',
+        help="dcraw, dcraw_emu")
 
     options, arguments = p.parse_args()
 
@@ -744,12 +1142,19 @@ def main():
     # 
     inputPaths = options.input
     inputFolder = options.inputFolder
+    multiInputFolder = options.multiInputFolder
+    bracketSize = options.bracketSize
     outputPath = options.output
     responseLUTPath = options.responseLUT
     writeIntermediate = options.writeIntermediate == True
     verbose = options.verbose == True
     baseExposureIndex = options.baseExposure
     gamut = options.gamut
+    compression = options.compression
+    compressionQuality = options.quality
+    rawSaturationPoint = options.rawSaturationPoint
+    alignImages = options.alignImages == True
+    dcrawVariant = options.dcraw
 
     try:
         argsStart = sys.argv.index('--') + 1
@@ -762,24 +1167,51 @@ def main():
         print( "command line : \n%s\n" % " ".join(sys.argv) )
 
     # Process a folder 
-    if inputFolder:
+    if multiInputFolder:
+        mergeHDRFolderMulti(multiInputFolder, 
+            bracketSize = bracketSize,
+            responseLUTPath = responseLUTPath,
+            writeIntermediate = writeIntermediate, 
+            baseExposureIndex = baseExposureIndex,
+            outputPath = outputPath,
+            outputGamut = gamut,
+            compression = compression,
+            compressionQuality = compressionQuality,
+            rawSaturationPoint = rawSaturationPoint,
+            alignImages = alignImages,
+            dcrawVariant = dcrawVariant)
+
+    elif inputFolder:
         mergeHDRFolder(inputFolder, 
             responseLUTPath = responseLUTPath,
             writeIntermediate = writeIntermediate, 
             baseExposureIndex = baseExposureIndex,
             outputPath = outputPath,
-            outputGamut = gamut)
+            outputGamut = gamut,
+            compression = compression,
+            compressionQuality = compressionQuality,
+            rawSaturationPoint = rawSaturationPoint,
+            alignImages = alignImages,
+            dcrawVariant = dcrawVariant)
 
     # Process an explicit list of files
-    else:
+    elif inputPaths:
         mergeHDRGroup(inputPaths,
             responseLUTPath = responseLUTPath,
             writeIntermediate = writeIntermediate,
             baseExposureIndex = baseExposureIndex,
             outputPath = outputPath,
-            outputGamut = gamut)
+            outputGamut = gamut,
+            compression = compression,
+            compressionQuality = compressionQuality,
+            rawSaturationPoint = rawSaturationPoint,
+            alignImages = alignImages,
+            dcrawVariant = dcrawVariant)
+    # Missing one type of proper input
+    else:
+        p.print_help()
 
- # main
+# main
 
 if __name__ == '__main__':
     main()
