@@ -1,0 +1,125 @@
+//
+// Copyright (c) 2014-2015 Haarm-Pieter Duiker <hpd1@duikerresearch.com>
+//
+
+//
+// A kernel that will apply 1d LUT to an image. The 1d LUT is represented as a linear ramp image
+//
+
+// Utility
+float4 mix(float4 a, float4 b, float4 f) {
+  float4 mixed;
+  mixed.x = a.x*(1.f - f.x) + b.x*f.x;
+  mixed.y = a.y*(1.f - f.y) + b.y*f.y;
+  mixed.z = a.z*(1.f - f.z) + b.z*f.z;
+  mixed.w = a.w*(1.f - f.w) + b.w*f.w;
+  return mixed;  
+}
+
+//
+// kernel
+//
+kernel LUTApply1DKernel : public ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessRandom, eEdgeClamped> src;
+  Image<eRead, eAccessRandom, eEdgeClamped> lut1dImage;
+  Image<eWrite> dst;
+
+  param:
+    int interpolation;
+
+  local:
+    int lutResolution;
+
+  void define() {
+    defineParam(interpolation, "interpolation", 1);
+  }
+
+  void init() {
+    float pixels = lut1dImage.bounds.width();
+    lutResolution = int(pixels);
+  }
+
+  void process(int2 pos) {
+    SampleType(lut1dImage) lut1dImageSample;
+
+    // Sample the src image
+    SampleType(src) srcSample;
+    srcSample = src(pos.x, pos.y);
+
+    lut1dImageSample.x = 0.f;
+    lut1dImageSample.y = 0.f;
+    lut1dImageSample.z = 0.f;
+
+    // Use the 1D LUT to find the new value
+
+    // Nearest point
+    if( interpolation == 0 ) {
+      int3 srcLUTPosition;
+      srcLUTPosition.x = round(clamp(srcSample.x, 0.0f, 1.0f) * (lutResolution-1));
+      srcLUTPosition.y = round(clamp(srcSample.y, 0.0f, 1.0f) * (lutResolution-1));
+      srcLUTPosition.z = round(clamp(srcSample.z, 0.0f, 1.0f) * (lutResolution-1));
+
+      lut1dImageSample = lut1dImage(srcLUTPosition.x, 0);
+      float r = lut1dImageSample.x;
+      lut1dImageSample = lut1dImage(srcLUTPosition.y, 0);
+      float g = lut1dImageSample.y;
+      lut1dImageSample = lut1dImage(srcLUTPosition.z, 0);
+      float b = lut1dImageSample.z;
+
+      lut1dImageSample.x = r;
+      lut1dImageSample.y = g;
+      lut1dImageSample.z = b;
+    } // nearest
+
+    // Bi-linear interpolation 
+    else if( interpolation == 1 ) {
+      int3 srcLUTPosition[2];
+      srcLUTPosition[0].x = floor(clamp(srcSample.x, 0.0f, 1.0f) * (lutResolution-1));
+      srcLUTPosition[0].y = floor(clamp(srcSample.y, 0.0f, 1.0f) * (lutResolution-1));
+      srcLUTPosition[0].z = floor(clamp(srcSample.z, 0.0f, 1.0f) * (lutResolution-1));
+
+      srcLUTPosition[1].x = ceil(clamp(srcSample.x, 0.0f, 1.0f) * (lutResolution-1));
+      srcLUTPosition[1].y = ceil(clamp(srcSample.y, 0.0f, 1.0f) * (lutResolution-1));
+      srcLUTPosition[1].z = ceil(clamp(srcSample.z, 0.0f, 1.0f) * (lutResolution-1));
+
+      float4 interp;
+      interp.x = (clamp(srcSample.x, 0.0f, 1.0f) * (lutResolution-1)) - srcLUTPosition[0].x;
+      interp.y = (clamp(srcSample.y, 0.0f, 1.0f) * (lutResolution-1)) - srcLUTPosition[0].y;
+      interp.z = (clamp(srcSample.z, 0.0f, 1.0f) * (lutResolution-1)) - srcLUTPosition[0].z;
+      interp.w = 1.0;
+
+      // Two samples from LUT
+      float4 lower, higher;;
+
+      // sample r, g, b for lower position
+      lut1dImageSample = lut1dImage(srcLUTPosition[0].x, 0);
+      lower.x = lut1dImageSample.x;
+      lut1dImageSample = lut1dImage(srcLUTPosition[0].y, 0);
+      lower.y = lut1dImageSample.y;
+      lut1dImageSample = lut1dImage(srcLUTPosition[0].z, 0);
+      lower.z = lut1dImageSample.z;
+      lower.w = 1.0;
+
+      // sample r, g, b for higher position
+      lut1dImageSample = lut1dImage(srcLUTPosition[1].x, 0);
+      higher.x = lut1dImageSample.x;
+      lut1dImageSample = lut1dImage(srcLUTPosition[1].y, 0);
+      higher.y = lut1dImageSample.y;
+      lut1dImageSample = lut1dImage(srcLUTPosition[1].z, 0);
+      higher.z = lut1dImageSample.z;
+      higher.w = 1.0;
+
+      // Interpolate the samples
+      lut1dImageSample = mix(lower, higher, interp);
+    } // bi-linear
+
+    // Write the new value to dst
+    SampleType(dst) t;
+    t.x = lut1dImageSample.x;
+    t.y = lut1dImageSample.y;
+    t.z = lut1dImageSample.z;
+
+    dst() = t;
+  }
+};

@@ -1,0 +1,167 @@
+//
+// Copyright (c) 2014-2015 Haarm-Pieter Duiker <hpd1@duikerresearch.com>
+//
+
+//
+// A kernel that will recover a 1d LUT by comparing two images
+//
+
+//
+// A distance-based weighting function
+//
+float falloffFilter(float d, float f) {
+  return exp(-d * f);
+}
+
+//
+// Map from the 2D position in the CMSTestPattern image to a 1D LUT position
+//
+int nukePosition2dToPosition1d(int2 pos, int width, int lutResolution) {
+    int4 position;
+
+    float indexNormalized = float(pos.x)/(width-1);
+
+    return indexNormalized*lutResolution;
+}
+
+//
+// kernel
+//
+kernel LUTRecover1DKernel : public ImageComputationKernel<ePixelWise>
+{
+  Image<eRead, eAccessRandom, eEdgeClamped> lut1DPattern;
+  Image<eRead, eAccessRandom, eEdgeClamped> before;
+  Image<eRead, eAccessRandom, eEdgeClamped> after;
+  Image<eWrite> dst;
+
+  param:
+    float cutoff;
+    float falloff;
+
+  local:
+    int lutResolution;
+
+  void define() {
+    defineParam(cutoff, "cutoff", 0.5f);
+    defineParam(falloff, "falloff", 5.f);
+  }
+
+  void init() {
+    lutResolution = int(lut1DPattern.bounds.width());
+  }
+
+  void process(int2 pos) {
+    float3 value;
+    float highDistance;
+
+    //
+    // Information for the input pixel position
+    //
+    int lut1DPosition;
+    lut1DPosition = nukePosition2dToPosition1d(pos, 
+      lut1DPattern.bounds.width(), lutResolution);
+
+    float lut1DSample;
+    lut1DSample = float(lut1DPosition) / (lutResolution-1.f);
+
+    //
+    // Brute force scattered data interpolation
+    // Each pixel in the input lut1DPattern corresponds to a LUT entry
+    // For each pixel in the input lut1DPattern
+    // - Step through each pixel location in the before and after images
+    // --- For each channel, since we're computing a 1D LUT
+    // ------ Compute a weight based on the before pixel color's proximity to the cms pixel
+    // ------ Multiply the after pixel's color by the weight
+    // ------ Add the weight and the weighted after pixel's color to running sum
+    // ---- Divide by the sum of the weights 
+    //
+    float weightedValueSum;
+    float weightSum;
+
+    float weight, distance;
+
+    int2 highPosition;
+    float highSample, highValue;
+
+    SampleType(before) beforePixel;
+    float beforeSample;
+    SampleType(after) afterPixel;
+    float afterSample;
+
+    // Step through each channel
+    for(int c = 0; c<3; c += 1) {
+      weightedValueSum = float(0.f);
+      weightSum = 0.f;
+      highDistance = 1000.f;
+
+      // Step through each of the before and after input pixels
+      for(int inX = 0; inX<before.bounds.width(); inX += 1) {
+        for(int inY = 0; inY<before.bounds.height(); inY += 1) {
+
+          // Get sample values
+          beforePixel = before(inX, inY);
+          beforeSample = beforePixel[c];
+          afterPixel = after(inX, inY);
+          afterSample = afterPixel[c];
+
+          // Skip pixels with a 0 alpha
+          if( beforePixel[3] == 0.0 )
+            continue;
+
+          // Compute weight for this sample
+          // How close is the 'before' value to the current lut1DPattern value
+          distance = fabs(beforeSample - lut1DSample);
+          if( distance < cutoff )
+            weight = falloffFilter(distance*lutResolution, falloff);
+          else
+            weight = 0.f;
+
+          // Keep track of the closest sample, just in case
+          if( distance < highDistance ) {
+            highDistance = distance;
+            highValue = afterSample;
+            highPosition = int2(inX, inY);
+          }
+
+          // Add into interpolation sum
+          weightedValueSum += weight * afterSample;
+          weightSum += weight;
+        }
+      }
+
+      // Divide out weighting
+      if( weightSum > 0.f ) {
+        value[c] = weightedValueSum / weightSum;
+        highDistance = weightSum;
+
+      // Use the nearest sample if there were no weighted values
+      } else {
+        value[c] = highValue;
+        highDistance = 1000.f;
+      }
+    }
+
+    //
+    // Diagnostics
+    // 
+    /*
+    value.x = lutResolution;
+    value.y = inputPosition.w;
+
+    value.x = inputSample.x;
+    value.y = inputSample.y;
+    value.z = inputSample.z;
+    */
+
+    //
+    // Copy to output
+    //
+    SampleType(lut1DPattern) t;
+    t.x = value.x;
+    t.y = value.y;
+    t.z = value.z;
+    t.w = highDistance;
+
+    dst() = t;
+  }
+};
